@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { VoirAnimeEpisode } from '../../../src/extractors/platforms/voiranime.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
-import { Logger } from '../../../src/utils.js';
+import { Logger, sanitizeFilename } from '../../../src/utils.js';
 import { JobStore } from './jobStore.js';
 
 export class DownloadJob {
@@ -61,11 +62,17 @@ export class DownloadJob {
     });
   }
 
+  _log(msg) {
+    const ts = new Date().toISOString().slice(11, 19);
+    console.log(`[${ts}][${this.jobId.slice(0, 8)}] ${msg}`);
+  }
+
   async start() {
     this.status = 'running';
     this._save();
 
     const { outputDir, player, quality, maxConcurrent } = this.options;
+    this._log(`STARTED | ${this.episodes.length} episode(s) | player=${player} quality=${quality} max=${maxConcurrent}`);
     const logger = new Logger();
 
     const abortController = new AbortController();
@@ -85,6 +92,7 @@ export class DownloadJob {
 
       // Resume: skip episodes already completed or skipped
       if (ep.status === 'completed' || ep.status === 'skipped') {
+        this._log(`EP ${ep.number} SKIP — already done (${ep.filePath})`);
         this.sseManager.send(this.jobId, 'episode-skip', {
           jobId: this.jobId, episode: ep.number, path: ep.filePath, skipped: true,
         });
@@ -99,10 +107,16 @@ export class DownloadJob {
       ep.status = 'fetching';
       ep.phase = 'resolving_url';
       ep.progress = { bytes: 0, total: 0, speed: 0, percent: 0 };
+      this._log(`EP ${ep.number} START — resolving URL: ${ep.url}`);
       this.sseManager.send(this.jobId, 'episode-start', {
         jobId: this.jobId, episode: ep.number, phase: ep.phase,
       });
       this._save();
+
+      // Compute expected file path BEFORE downloading so cancel() can clean it up
+      const outputDir = path.resolve(this.options.outputDir || '.');
+      const safeName = ep.title ? sanitizeFilename(ep.title) : `ep${String(ep.number).padStart(2, '0')}`;
+      ep.filePath = path.join(outputDir, `${safeName}.mp4`);
 
       try {
         const episode = new VoirAnimeEpisode({
@@ -125,6 +139,31 @@ export class DownloadJob {
           // Once we enter "downloading" phase, reflect it in status
           if (ep.phase === 'downloading' && ep.status !== 'downloading') {
             ep.status = 'downloading';
+            const totMb = (ep.progress.total / 1024 / 1024).toFixed(1);
+            this._log(`EP ${ep.number} DOWNLOAD starting — 0% / ${totMb}MB`);
+            ep._lastLoggedPct = -5; // ensures first real byte logs at ~0-5%
+          }
+
+          if (progress.phase === 'extracting_video' && ep.status === 'fetching') {
+            this._log(`EP ${ep.number} PHASE extracting_video`);
+          }
+
+          // Log progress every ~5% with a visual bar
+          if (ep.phase === 'downloading') {
+            const pct = Math.min(100, Math.round(ep.progress.percent));
+            const prevPct = ep._lastLoggedPct || -5;
+            if (pct >= prevPct + 5) {
+              // Build a visual progress bar: 20 chars wide
+              const barW = 20;
+              const filled = Math.round(pct / 100 * barW);
+              const empty = barW - filled;
+              const bar = '█'.repeat(filled) + '░'.repeat(empty);
+              const spd = ep.progress.speed > 0 ? (ep.progress.speed / 1024 / 1024).toFixed(1) : '?';
+              const mb = (ep.progress.bytes / 1024 / 1024).toFixed(1);
+              const tot = (ep.progress.total / 1024 / 1024).toFixed(1);
+              this._log(`EP ${ep.number} [${bar}] ${String(pct).padStart(3)}% — ${mb}MB / ${tot}MB @ ${spd}MB/s`);
+              ep._lastLoggedPct = pct;
+            }
           }
 
           this._sendProgress(ep, {
@@ -139,10 +178,17 @@ export class DownloadJob {
           if (result.error === 'Cancelled') {
             ep.status = 'cancelled';
             ep.phase = 'cancelled';
+            // Delete the partial file if it exists
+            if (ep.filePath) {
+              try { fs.unlinkSync(ep.filePath); this._log(`EP ${ep.number} deleted partial file`); } catch {}
+              ep.filePath = null;
+            }
+            this._log(`EP ${ep.number} CANCELLED`);
           } else {
             ep.status = 'error';
             ep.phase = 'error';
             ep.error = result.error;
+            this._log(`EP ${ep.number} ERROR — ${result.error}`);
             this.sseManager.send(this.jobId, 'episode-error', {
               jobId: this.jobId, episode: ep.number, error: result.error,
             });
@@ -151,6 +197,8 @@ export class DownloadJob {
           ep.status = result.skipped ? 'skipped' : 'completed';
           ep.phase = result.skipped ? 'skipped' : 'completed';
           ep.filePath = result.path;
+          const outcome = result.skipped ? 'SKIPPED' : 'COMPLETED';
+          this._log(`EP ${ep.number} ${outcome} — ${result.path || 'no path'}`);
           this.sseManager.send(this.jobId, 'episode-complete', {
             jobId: this.jobId, episode: ep.number, path: result.path, skipped: !!result.skipped,
           });
@@ -159,10 +207,17 @@ export class DownloadJob {
         if (err.name === 'CanceledError' || err.message === 'Cancelled' || this.cancelled) {
           ep.status = 'cancelled';
           ep.phase = 'cancelled';
+          // Delete the partial file if it exists
+          if (ep.filePath) {
+            try { fs.unlinkSync(ep.filePath); this._log(`EP ${ep.number} deleted partial file`); } catch {}
+            ep.filePath = null;
+          }
+          this._log(`EP ${ep.number} CANCELLED (exception)`);
         } else {
           ep.status = 'error';
           ep.phase = 'error';
           ep.error = err.message;
+          this._log(`EP ${ep.number} ERROR — ${err.message}`);
           this.sseManager.send(this.jobId, 'episode-error', {
             jobId: this.jobId, episode: ep.number, error: err.message,
           });
@@ -178,10 +233,13 @@ export class DownloadJob {
     if (!this.cancelled) {
       const completed = this.episodes.filter(e => e.status === 'completed' || e.status === 'skipped').length;
       const errors = this.episodes.filter(e => e.status === 'error').map(e => ({ episode: e.number, error: e.error }));
+      this._log(`JOB COMPLETE — ${completed}/${this.episodes.length} OK, ${errors.length} error(s)`);
       this.sseManager.send(this.jobId, 'complete', {
         jobId: this.jobId, totalEpisodes: this.episodes.length,
         successCount: completed, errorCount: errors.length, errors,
       });
+    } else {
+      this._log('JOB CANCELLED');
     }
     this._save();
     this.sseManager.removeJob(this.jobId);
@@ -201,6 +259,11 @@ export class DownloadJob {
       if (ep.status === 'pending' || ep.status === 'fetching' || ep.status === 'downloading') {
         ep.status = 'cancelled';
         ep.phase = 'cancelled';
+        // Delete partial file for this cancelled in-progress episode
+        if (ep.filePath) {
+          try { fs.unlinkSync(ep.filePath); this._log(`EP ${ep.number} partial file deleted`); } catch {}
+          ep.filePath = null;
+        }
       }
     }
     this._save();

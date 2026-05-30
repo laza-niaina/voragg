@@ -154,10 +154,21 @@ export class SmartDownloader {
             fileBar.update(downloaded, { speed: formatSpeed(speed), valFmt: formatBytes(downloaded) });
             lastTime = now;
             lastBytes = downloaded;
-            if (onProgress) onProgress({ bytes: downloaded, total: actualTotal, speed, percent: (downloaded / actualTotal) * 100 });
           } else {
             fileBar.update(downloaded, { valFmt: formatBytes(downloaded) });
-            if (onProgress) onProgress({ bytes: downloaded, total: actualTotal, speed: 0, percent: (downloaded / actualTotal) * 100 });
+          }
+        }
+
+        // Always report progress to caller (SSE, GUI) regardless of CLI bar
+        if (onProgress) {
+          const now = Date.now();
+          if ((now - lastTime) >= 250 || downloaded === startFrom) {
+            const bytesDelta = downloaded - lastBytes;
+            const spd = bytesDelta > 0 ? bytesDelta / Math.max((now - lastTime) / 1000, 0.001) : 0;
+            const pct = actualTotal > 0 ? (downloaded / actualTotal) * 100 : 0;
+            onProgress({ bytes: downloaded, total: actualTotal, speed: spd, percent: pct });
+            lastTime = now;
+            lastBytes = downloaded;
           }
         }
       });

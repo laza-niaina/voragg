@@ -160,7 +160,7 @@ public class EpisodeViewModel : INotifyPropertyChanged
         }
     }
 
-    private string _statusDisplayText = "";
+    private string _statusDisplayText = "Pending";
     public string StatusDisplayText
     {
         get => _statusDisplayText;

@@ -220,4 +220,7 @@ async function handler(req, res) {
 const server = http.createServer(handler);
 server.listen(config.port, () => {
   console.log(`voragg API server running on http://localhost:${config.port}`);
+  console.log(`  Health: http://localhost:${config.port}/api/health`);
+  console.log(`  SSE:    http://localhost:${config.port}/api/downloads/<jobId>/progress`);
+  console.log('---');
 });

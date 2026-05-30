@@ -11,6 +11,14 @@
         Loaded="Window_Loaded">
 
     <Window.Resources>
+        <!-- System Colors for dark dropdown popup (ComboBox etc.) -->
+        <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#1A1A2E"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#F5F7FA"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}" Color="#1A1A2E"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="#F5F7FA"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#7C3AED"/>
+        <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+
         <!-- Brushes — VoraGG Modern Palette -->
         <SolidColorBrush x:Key="BgPrimary" Color="#09090B"/>
         <SolidColorBrush x:Key="BgSecondary" Color="#111122"/>
@@ -151,7 +159,7 @@
             </Style.Triggers>
         </Style>
 
-        <!-- ComboBox -->
+        <!-- ComboBox — using default WPF template for reliable rendering -->
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="#1A1A2E"/>
             <Setter Property="Foreground" Value="#F5F7FA"/>
@@ -160,58 +168,12 @@
             <Setter Property="Padding" Value="10 7"/>
             <Setter Property="FontSize" Value="13"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ComboBox">
-                        <Grid>
-                            <Border Name="Border" Background="{TemplateBinding Background}"
-                                    BorderBrush="{TemplateBinding BorderBrush}"
-                                    BorderThickness="{TemplateBinding BorderThickness}"
-                                    CornerRadius="6" Padding="{TemplateBinding Padding}">
-                                <Grid>
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="Auto"/>
-                                    </Grid.ColumnDefinitions>
-                                    <ContentPresenter Grid.Column="0" Content="{TemplateBinding SelectionBoxItem}"
-                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                                      ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
-                                                      VerticalAlignment="Center"
-                                                      Margin="0 0 6 0"/>
-                                    <TextBlock Grid.Column="1" Text="▾" Foreground="#7C3AED"
-                                               FontSize="10" VerticalAlignment="Center"/>
-                                </Grid>
-                            </Border>
-                            <Popup Name="Popup" Placement="Bottom"
-                                   IsOpen="{TemplateBinding IsDropDownOpen}"
-                                   AllowsTransparency="True"
-                                   Focusable="False"
-                                   PopupAnimation="Slide">
-                                <Border Name="DropDownBorder" Background="#1A1A2E"
-                                        BorderBrush="#3D3D6B" BorderThickness="1"
-                                        CornerRadius="6" MaxHeight="{TemplateBinding MaxDropDownHeight}">
-                                    <ScrollViewer>
-                                        <ItemsPresenter/>
-                                    </ScrollViewer>
-                                </Border>
-                            </Popup>
-                        </Grid>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Border" Property="BorderBrush" Value="#7C3AED"/>
-                            </Trigger>
-                            <Trigger Property="IsDropDownOpen" Value="True">
-                                <Setter TargetName="Border" Property="BorderBrush" Value="#7C3AED"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
+            <Setter Property="MinHeight" Value="34"/>
         </Style>
 
         <!-- ComboBoxItem -->
         <Style TargetType="ComboBoxItem">
-            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Background" Value="#1A1A2E"/>
             <Setter Property="Foreground" Value="#F5F7FA"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="10 7"/>
@@ -353,9 +315,17 @@
                             <Setter Property="Maximum" Value="100"/>
                             <Setter Property="IsIndeterminate" Value="False"/>
                             <Style.Triggers>
+                                <DataTrigger Binding="{Binding Status}" Value="pending">
+                                    <Setter Property="IsIndeterminate" Value="True"/>
+                                    <Setter Property="Foreground" Value="{StaticResource CyanGlow}"/>
+                                </DataTrigger>
                                 <DataTrigger Binding="{Binding Status}" Value="fetching">
                                     <Setter Property="IsIndeterminate" Value="True"/>
                                     <Setter Property="Foreground" Value="{StaticResource AccentBlue}"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Status}" Value="downloading">
+                                    <Setter Property="IsIndeterminate" Value="False"/>
+                                    <Setter Property="Foreground" Value="{StaticResource AccentPurple}"/>
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding Status}" Value="completed">
                                     <Setter Property="Foreground" Value="#10B981"/>
@@ -501,7 +471,7 @@
                     <Border x:Name="OptionsPanel" Grid.Row="1"
                             Background="#111122" BorderBrush="#2D2D4A"
                             BorderThickness="1" CornerRadius="12" Padding="14"
-                            Margin="0 0 0 10" IsEnabled="False">
+                            Margin="0 0 0 10">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto"/>
@@ -517,18 +487,10 @@
                                 <TextBlock Text="Player:" Foreground="#9CA3AF"
                                            VerticalAlignment="Center" Margin="0 0 8 0"/>
                                 <ComboBox x:Name="PlayerCombo" SelectedIndex="0" Width="130"
-                                          Margin="0 0 24 0">
-                                    <ComboBoxItem Content="streamtape"/>
-                                    <ComboBoxItem Content="mytv"/>
-                                    <ComboBoxItem Content="videosaba"/>
-                                </ComboBox>
+                                          Margin="0 0 24 0"/>
                                 <TextBlock Text="Quality:" Foreground="#9CA3AF"
                                            VerticalAlignment="Center" Margin="0 0 8 0"/>
-                                <ComboBox x:Name="QualityCombo" SelectedIndex="0" Width="100">
-                                    <ComboBoxItem Content="1080p"/>
-                                    <ComboBoxItem Content="720p"/>
-                                    <ComboBoxItem Content="480p"/>
-                                </ComboBox>
+                                <ComboBox x:Name="QualityCombo" SelectedIndex="0" Width="100"/>
                             </StackPanel>
 
                             <!-- Row 1: Output + Max/From/To -->

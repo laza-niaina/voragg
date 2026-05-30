@@ -4,7 +4,7 @@
   "description": "Anime downloader with web API and desktop GUI",
   "type": "module",
   "scripts": {
-    "server": "node server/src/index.js"
+    "server": "node --no-warnings server/src/index.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

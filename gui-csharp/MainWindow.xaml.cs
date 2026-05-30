@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Net;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -17,6 +19,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title = "VoraGG Downloader 1.0.1";
+        PlayerCombo.ItemsSource = new[] { "streamtape", "vidmoly" };
+        QualityCombo.ItemsSource = new[] { "1080p", "720p", "480p" };
         DownloadJobsControl.ItemsSource = _downloadJobs;
         LogListView.ItemsSource = _logEntries;
         ClearAllButton.Visibility = Visibility.Collapsed;
@@ -107,7 +112,6 @@ public partial class MainWindow : Window
 
             EpisodeListView.ItemsSource = _episodeItems;
             EpisodeCountText.Text = $"Episodes ({_episodeItems.Count})";
-            OptionsPanel.IsEnabled = true;
             StatusText.Text = $"Found {_episodeItems.Count} episodes";
             Log($"Found {_episodeItems.Count} episodes", LogType.Success);
             UpdateDownloadButton();
@@ -186,8 +190,8 @@ public partial class MainWindow : Window
         }).ToList();
 
         var outputDir = OutputDirTextBox.Text.Trim();
-        var player = (PlayerCombo.SelectedItem as ComboBoxItem)?.Content?.ToString();
-        var quality = (QualityCombo.SelectedItem as ComboBoxItem)?.Content?.ToString();
+        var player = PlayerCombo.SelectedItem as string;
+        var quality = QualityCombo.SelectedItem as string;
         int? maxConcurrent = int.TryParse(MaxConcurrentText.Text, out var mc) ? mc : null;
 
         DownloadButton.IsEnabled = false;
@@ -258,34 +262,75 @@ public partial class MainWindow : Window
 
         _ = Task.Run(async () =>
         {
+            // Step 1: fetch current job state first to catch any events
+            // that already fired before SSE connection was established
+            try
+            {
+                var jobState = await _api.GetJobAsync(jobId);
+                if (jobState is not null)
+                {
+                    Dispatcher.Invoke(() => ApplyJobState(jobId, jobState));
+                    if (jobState.Status is "completed" or "cancelled" or "error")
+                    {
+                        Dispatcher.Invoke(() =>
+                            Log($"Job {jobId[..8]} — already {jobState.Status}, no SSE needed", LogType.Info));
+                        return;
+                    }
+                }
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
+                Dispatcher.Invoke(() =>
+                    Log($"Job {jobId[..8]} — not found on server", LogType.Error));
+                return;
+            }
+            catch
+            {
+                // Server might be down — will retry via SSE loop below
+            }
+
+            // Step 2: open SSE stream for real-time updates
+            int retryCount = 0;
+            const int maxRetries = 10;
+
             while (!cts.Token.IsCancellationRequested)
             {
                 try
                 {
-                    Dispatcher.Invoke(() =>
-                        Log($"Job {jobId[..8]} — SSE connected", LogType.Info));
-
+                    retryCount = 0;
                     await _api.SubscribeToProgress(jobId, sseEvent =>
                     {
                         Dispatcher.Invoke(() => ProcessSseEvent(jobId, sseEvent));
                     }, cts.Token);
 
-                    // Stream ended naturally (job completed/cancelled) — stop retrying
+                    // Stream ended naturally — stop retrying
                     break;
                 }
                 catch (OperationCanceledException)
                 {
-                    // expected when cancelled — stop retrying
+                    break;
+                }
+                catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    Dispatcher.Invoke(() =>
+                        Log($"Job {jobId[..8]} — SSE stopped: job not found", LogType.Error));
                     break;
                 }
                 catch (Exception ex)
                 {
-                    // SSE connection lost — log and retry
-                    Dispatcher.Invoke(() =>
+                    retryCount++;
+                    if (retryCount > maxRetries)
                     {
-                        StatusText.Text = $"Lost connection for {jobId[..8]} — retrying...";
-                        Log($"Job {jobId[..8]} — SSE lost: {ex.Message}", LogType.Error);
-                    });
+                        Dispatcher.Invoke(() =>
+                            Log($"Job {jobId[..8]} — SSE gave up after {maxRetries} retries", LogType.Error));
+                        break;
+                    }
+
+                    if (retryCount <= 3)
+                    {
+                        Dispatcher.Invoke(() =>
+                            Log($"Job {jobId[..8]} — SSE lost: {ex.Message}", LogType.Error));
+                    }
 
                     // Check if job is still active before retrying
                     try
@@ -294,20 +339,21 @@ public partial class MainWindow : Window
                         if (job is null || job.Status is "completed" or "cancelled" or "error")
                             break;
                     }
+                    catch (HttpRequestException checkEx) when (checkEx.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        break;
+                    }
                     catch
                     {
-                        // Server down — wait for it
+                        // Server down — wait before retry
                     }
 
-                    // Wait for server to come back
+                    // Exponential backoff with jitter: 2s, 4s, 8s, 16s, ... capped at 30s
+                    int delayMs = Math.Min(2000 * (int)Math.Pow(2, retryCount - 1), 30000);
+                    delayMs += Random.Shared.Next(0, 1000);
                     try
                     {
-                        await _api.WaitForServerAsync(cts.Token);
-                        Dispatcher.Invoke(() =>
-                        {
-                            StatusText.Text = $"Reconnected — resuming {jobId[..8]}";
-                            Log($"Job {jobId[..8]} — server reconnected, resuming SSE", LogType.Success);
-                        });
+                        await Task.Delay(delayMs, cts.Token);
                     }
                     catch (OperationCanceledException)
                     {
@@ -318,6 +364,64 @@ public partial class MainWindow : Window
 
             Dispatcher.Invoke(() => _sseCts.Remove(jobId));
         });
+    }
+
+    /// <summary>
+    /// Apply fetched job state to the local ViewModel — pre-populates
+    /// episodes that have already progressed/completed before SSE opened.
+    /// </summary>
+    private void ApplyJobState(string jobId, JobResponse jobState)
+    {
+        var job = _downloadJobs.FirstOrDefault(j => j.JobId == jobId);
+        if (job is null) return;
+
+        job.Status = jobState.Status;
+
+        if (jobState.Episodes is null) return;
+
+        foreach (var serverEp in jobState.Episodes)
+        {
+            var localEp = job.Episodes.FirstOrDefault(e => e.Number == serverEp.Number);
+            if (localEp is null) continue;
+
+            // Only update if server has more recent state
+            if (serverEp.Status is "completed" or "skipped" or "error")
+            {
+                localEp.Status = serverEp.Status;
+                localEp.StatusDisplayText = serverEp.Status switch
+                {
+                    "completed" => "Completed",
+                    "skipped"   => "Skipped",
+                    "error"     => "Error",
+                    _           => localEp.StatusDisplayText,
+                };
+                if (serverEp.Status is "completed" or "skipped")
+                    localEp.ProgressPercent = 100;
+                localEp.FilePath = serverEp.Path;
+            }
+            else if (serverEp.Status is "downloading")
+            {
+                localEp.Status = "downloading";
+                localEp.StatusDisplayText = "Downloading...";
+                if (serverEp.Progress is not null)
+                {
+                    localEp.ProgressPercent = serverEp.Progress.Percent;
+                    localEp.DownloadedBytes = serverEp.Progress.Bytes;
+                    localEp.TotalBytes = serverEp.Progress.Total;
+                }
+            }
+            else if (serverEp.Status is "fetching")
+            {
+                localEp.Status = "fetching";
+                localEp.StatusDisplayText = serverEp.Phase switch
+                {
+                    "resolving_url"    => "Resolving URL...",
+                    "extracting_video" => "Extracting video...",
+                    _                  => "Fetching...",
+                };
+            }
+        }
+        job.UpdateProgress();
     }
 
     private void ProcessSseEvent(string jobId, SseEvent sseEvent)
@@ -337,7 +441,7 @@ public partial class MainWindow : Window
                 if (ep is not null)
                 {
                     ep.Status = "fetching";
-                    ep.StatusDisplayText = "";
+                    ep.StatusDisplayText = "Starting...";
                     ep.ProgressPercent = 0;
                     Log($"Job {jobId[..8]} — Episode {epNum} started");
                 }
@@ -364,7 +468,7 @@ public partial class MainWindow : Window
                         {
                             "resolving_url" => "Resolving URL...",
                             "extracting_video" => "Extracting video...",
-                            "downloading" => "",
+                            "downloading" => "Downloading...",
                             "completed" => "Completed",
                             "skipped" => "Skipped",
                             "error" => "Error",
@@ -376,14 +480,18 @@ public partial class MainWindow : Window
                     var speed = root.GetProperty("speed").GetDouble();
                     ep.DownloadedBytes = root.GetProperty("bytes").GetInt64();
                     ep.TotalBytes = root.GetProperty("total").GetInt64();
-                    // During downloading: show speed with file size
+
+                    // Show download state: percent + size + speed (if available)
                     if (ep.Status == "downloading")
                     {
-                        var speedText = speed > 0 ? FormatUtility.FormatSpeed(speed) : "";
-                        var sizeText = ep.SizeText;
-                        ep.StatusDisplayText = speedText.Length > 0
-                            ? $"{speedText} — {sizeText}"
-                            : sizeText;
+                        var pct = (int)Math.Round(ep.ProgressPercent);
+                        var size = ep.SizeText;
+                        if (speed > 0)
+                            ep.StatusDisplayText = $"Download {pct}% — {FormatUtility.FormatSpeed(speed)}";
+                        else if (!string.IsNullOrEmpty(size))
+                            ep.StatusDisplayText = $"Download {pct}% — {size}";
+                        else
+                            ep.StatusDisplayText = $"Download {pct}%";
                     }
                 }
                 break;
